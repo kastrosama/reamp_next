@@ -14,13 +14,21 @@ android {
   }
 }
 
+// expo-audio ships prebuilt (a local Maven repo inside its npm package), not
+// as a Gradle project, so we depend on that artifact directly. Its version is
+// read from its package.json so this stays in step with Expo upgrades.
+def expoAudioDir = new File(rootDir, "../node_modules/expo-audio")
+def expoAudioVersion = new groovy.json.JsonSlurper().parse(new File(expoAudioDir, "package.json")).version
+
 repositories {
   mavenCentral()
+  google()
+  maven { url = new File(expoAudioDir, "local-maven-repo").toURI() }
 }
 
 dependencies {
   // We read the audio session from expo-audio's player, so we compile
   // against it and the same media3 version it uses.
-  implementation project(':expo-audio')
-  implementation "androidx.media3:media3-exoplayer:1.9.0"
+  compileOnly "expo.modules.audio:expo.modules.audio:${expoAudioVersion}"
+  compileOnly "androidx.media3:media3-exoplayer:1.9.0"
 }
