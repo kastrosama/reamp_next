@@ -13,6 +13,7 @@ import {
   setAudioModeAsync,
 } from 'expo-audio';
 import { STATIONS } from './src/stations';
+import { ReampEq, sliderToDb } from './modules/reamp-eq';
 
 type WebMsg =
   | { t: 'ready' }
@@ -23,11 +24,24 @@ type WebMsg =
   | { t: 'stop' }
   | { t: 'volume'; v: number }
   | { t: 'seek'; percent: number }
-  | { t: 'enableVis' };
+  | { t: 'enableVis' }
+  | { t: 'eqBand'; i: number; v: number }
+  | { t: 'eqPreamp'; v: number }
+  | { t: 'eqOn'; on: boolean };
 
 // Webamp UI lives in the WebView; audio is played here, natively, so it keeps
 // running in the background with lock-screen / notification controls.
 const player = createAudioPlayer(null, { updateInterval: 500 });
+
+// Hook the native EQ onto the player's audio session. Retried until it
+// succeeds, because the session can be unavailable before first playback.
+let eqAttached = false;
+const attachEq = () => {
+  if (eqAttached) return;
+  ReampEq.attach(player)
+    .then((id) => { eqAttached = id > 0; })
+    .catch(() => {});
+};
 
 export default function App() {
   return (
@@ -92,6 +106,7 @@ function Player() {
       const externalPause =
         wasPlaying.current && !s.playing && !s.isBuffering && !s.didJustFinish && !recentWebCommand;
       wasPlaying.current = s.playing;
+      if (s.playing) attachEq();
       const payload = {
         t: 'status',
         playing: s.playing,
@@ -126,6 +141,16 @@ function Player() {
           { isLiveStream: true, showSeekForward: false, showSeekBackward: false },
         );
         if (msg.autoPlay) player.play();
+        attachEq();
+        break;
+      case 'eqBand':
+        ReampEq.setBand(msg.i, sliderToDb(msg.v));
+        break;
+      case 'eqPreamp':
+        ReampEq.setPreamp(sliderToDb(msg.v));
+        break;
+      case 'eqOn':
+        ReampEq.setEnabled(msg.on);
         break;
       case 'play':
         player.play();

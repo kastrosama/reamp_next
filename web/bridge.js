@@ -181,10 +181,15 @@
   NativeMedia.prototype._emit = function (ev) { (this._listeners[ev] || []).forEach(function (cb) { cb(); }); };
   NativeMedia.prototype.setVolume = function (v) { post({ t: 'volume', v: v }); };
   NativeMedia.prototype.setBalance = function () {};
-  NativeMedia.prototype.setPreamp = function () {};
-  NativeMedia.prototype.setEqBand = function () {};
-  NativeMedia.prototype.disableEq = function () {};
-  NativeMedia.prototype.enableEq = function () {};
+  // EQ: slider values 0..100 (50 = 0 dB) are passed through; native maps them.
+  var BANDS = [60, 170, 310, 600, 1000, 3000, 6000, 12000, 14000, 16000];
+  NativeMedia.prototype.setPreamp = function (v) { post({ t: 'eqPreamp', v: v }); };
+  NativeMedia.prototype.setEqBand = function (band, v) {
+    var i = BANDS.indexOf(Number(band));
+    if (i >= 0) post({ t: 'eqBand', i: i, v: v });
+  };
+  NativeMedia.prototype.disableEq = function () { post({ t: 'eqOn', on: false }); };
+  NativeMedia.prototype.enableEq = function () { post({ t: 'eqOn', on: true }); };
   NativeMedia.prototype.timeElapsed = function () { return this._time; };
   NativeMedia.prototype.duration = function () { return this._duration; };
   NativeMedia.prototype.play = function () { post({ t: 'play' }); return Promise.resolve(); };
@@ -252,10 +257,12 @@
     }
   }, true);
 
-  // --- Phone layout: main window, EQ and playlist stacked vertically,
-  // playlist stretched to fill the rest of the screen.
+  // --- Phone layout: main window, EQ and playlist stacked top to bottom at
+  // full width. The playlist stretches to fill whatever height is left, and
+  // re-stretches whenever the EQ or playlist is opened, closed or shaded.
+  var FULL = 116, SHADE = 14, STEP = 29;
   var H = window.innerHeight || 600;
-  var extraHeight = Math.max(0, Math.floor((H - 116 * 3 - 8) / 29));
+  var extraHeight = Math.max(0, Math.floor((H - FULL * 3) / STEP));
 
   var webamp = new Webamp({
     initialTracks: stations.map(function (s) {
@@ -275,8 +282,58 @@
   });
   window.__webamp = webamp;
 
+  function layout() {
+    var store = webamp.store, st = store.getState(), w = st.windows.genWindows;
+    var H = window.innerHeight;
+    var main = w.main, eq = w.equalizer, pl = w.playlist;
+    var hMain = main.open ? (main.shade ? SHADE : FULL) : 0;
+    var hEq = eq.open ? (eq.shade ? SHADE : FULL) : 0;
+    var plExtra = pl.size ? pl.size[1] : 0;
+    var hPl = 0;
+    if (pl.open) {
+      if (pl.shade) hPl = SHADE;
+      else {
+        plExtra = Math.max(0, Math.floor((H - hMain - hEq - FULL) / STEP));
+        hPl = FULL + plExtra * STEP;
+      }
+    }
+    // Centre the stack vertically so any leftover (< one playlist step)
+    // is split thinly above and below.
+    var top = Math.max(0, Math.floor((H - hMain - hEq - hPl) / 2));
+    var want = {
+      main: { x: 0, y: top },
+      equalizer: { x: 0, y: top + hMain },
+      playlist: { x: 0, y: top + hMain + hEq },
+    };
+    var moved = ['main', 'equalizer', 'playlist'].some(function (id) {
+      var p = w[id].position;
+      return !p || p.x !== want[id].x || p.y !== want[id].y;
+    });
+    if (pl.open && !pl.shade && (!pl.size || pl.size[0] !== 0 || pl.size[1] !== plExtra)) {
+      store.dispatch({ type: 'WINDOW_SIZE_CHANGED', windowId: 'playlist', size: [0, plExtra] });
+    }
+    if (moved) store.dispatch({ type: 'UPDATE_WINDOW_POSITIONS', positions: want, absolute: true });
+  }
+
+  // Send the current EQ settings to native (Webamp only pushes changes).
+  function syncEq() {
+    var eq = webamp.store.getState().equalizer;
+    post({ t: 'eqOn', on: !!eq.on });
+    post({ t: 'eqPreamp', v: eq.sliders.preamp });
+    BANDS.forEach(function (b, i) { post({ t: 'eqBand', i: i, v: eq.sliders[b] }); });
+  }
+
   webamp.renderWhenReady(document.getElementById('app')).then(function () {
     setStatus('');
+    var busy = false;
+    webamp.store.subscribe(function () {
+      if (busy) return;
+      busy = true;
+      try { layout(); } finally { busy = false; }
+    });
+    window.addEventListener('resize', layout);
+    layout();
+    syncEq();
     post({ t: 'ready' });
   });
 })();

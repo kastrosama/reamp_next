@@ -1,0 +1,26 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.reampeq'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.reampeq"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+}
+
+repositories {
+  mavenCentral()
+}
+
+dependencies {
+  // We read the audio session from expo-audio's player, so we compile
+  // against it and the same media3 version it uses.
+  implementation project(':expo-audio')
+  implementation "androidx.media3:media3-exoplayer:1.9.0"
+}
