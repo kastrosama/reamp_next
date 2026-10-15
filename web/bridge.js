@@ -242,6 +242,9 @@
   };
 
   var stations = window.__STATIONS || [];
+  // Bytes of the skin most recently handed to the player, and of the one
+  // saved for next launch (so we know what to save when a skin finishes loading).
+  var pendingSkin = window.__SAVED_SKIN || null, savedSkin = window.__SAVED_SKIN || null;
   var currentUrl = null;
   // Title/artist for the lock screen and notification. Stations come from
   // the station list; files from the playlist entry (tags or file name).
@@ -283,6 +286,7 @@
     (msg.items || []).forEach(function (it) { refs.push({ __url: it.url, name: it.name }); });
     // Small files the engine reads itself (EQ presets, skins): real File objects.
     (msg.files || []).forEach(function (f) {
+      if (/\.(wsz|zip)$/i.test(f.name)) pendingSkin = f.b64;
       var bin = atob(f.b64), bytes = new Uint8Array(bin.length);
       for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       refs.push(new File([bytes], f.name, { type: f.type || '' }));
@@ -334,6 +338,7 @@
   function openSkin(msg) {
     var p = window.__player;
     if (!p || !msg.b64) return;
+    pendingSkin = msg.b64;
     var bin = atob(msg.b64), bytes = new Uint8Array(bin.length);
     for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     p.setSkinFromUrl(URL.createObjectURL(new Blob([bytes], { type: 'application/zip' })));
@@ -374,16 +379,41 @@
   var H = document.documentElement.clientHeight || window.innerHeight || 600;
   var extraHeight = Math.max(0, Math.floor((H - FULL * 3) / STEP));
 
+  // --- What we start with: last session's playlist, windows and skin if
+  // there is one (see src/savedState.ts), otherwise the starter stations.
+  var SAVED = window.__SAVED || null;
+  function b64ToBlobUrl(b64) {
+    var bin = atob(b64), bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }));
+  }
+  var startTracks = SAVED && SAVED.tracks.length
+    ? SAVED.tracks.map(function (t) {
+        var tr = { url: t.url, defaultName: t.name || t.url };
+        if (t.duration != null) tr.duration = t.duration;
+        if (t.live || t.title || t.artist) tr.metaData = { artist: t.artist || '', title: t.title || '', album: t.album || null };
+        if (t.live && tr.duration == null) tr.duration = 0;
+        return tr;
+      })
+    : stations.map(function (s) {
+        return { url: s.url, duration: 0, metaData: { artist: s.genre || 'Radio', title: s.name } };
+      });
+  var w0 = (SAVED && SAVED.windows) || {};
+  function winOpts(id) {
+    var w = w0[id] || {};
+    return { closed: w.open === false, shadeMode: !!w.shade };
+  }
+
   // The engine (MIT, see THIRD_PARTY_NOTICES.md) exposes its constructor globally.
   var Engine = window.Webamp;
   var player = new Engine({
-    initialTracks: stations.map(function (s) {
-      return { url: s.url, duration: 0, metaData: { artist: s.genre || 'Radio', title: s.name } };
-    }),
+    initialTracks: startTracks,
+    initialSkin: window.__SAVED_SKIN ? { url: b64ToBlobUrl(window.__SAVED_SKIN) } : undefined,
     windowLayout: {
-      main: { position: { top: 0, left: 0 } },
-      equalizer: { position: { top: 116, left: 0 } },
-      playlist: { position: { top: 232, left: 0 }, size: { extraHeight: extraHeight, extraWidth: 0 } },
+      // The main window always starts open (closing it would leave no controls).
+      main: Object.assign({ position: { top: 0, left: 0 } }, winOpts('main'), { closed: false }),
+      equalizer: Object.assign({ position: { top: 116, left: 0 } }, winOpts('equalizer')),
+      playlist: Object.assign({ position: { top: 232, left: 0 }, size: { extraHeight: extraHeight, extraWidth: 0 } }, winOpts('playlist')),
     },
     enableHotkeys: false,
     handleAddUrlEvent: function () {
@@ -485,6 +515,58 @@
     });
     flash('Auto EQ: ' + (name || 'Flat'));
   };
+
+  // --- Remember the playlist, the last-played track and the windows for next
+  // launch, and the skin (the last one loaded becomes the default).
+  var defaultSkinImages = player.store.getState().display.skinImages;
+  function snapshotState() {
+    var st = player.store.getState(), tracks = st.tracks, order = st.playlist.trackOrder;
+    var w = st.windows.genWindows;
+    var win = function (id) { return { open: !!w[id].open, shade: !!w[id].shade }; };
+    return {
+      version: 1,
+      tracks: order.map(function (id) {
+        var t = tracks[id];
+        return {
+          url: t.url, name: t.defaultName || undefined, title: t.title || undefined,
+          artist: t.artist || undefined, album: t.album || undefined,
+          duration: t.duration == null ? null : t.duration,
+          live: /^https?:/i.test(t.url) && !t.duration,
+        };
+      }),
+      current: order.indexOf(st.playlist.currentTrack),
+      windows: { main: win('main'), equalizer: win('equalizer'), playlist: win('playlist') },
+    };
+  }
+  function startRemembering() {
+    // Put the last-played track back in place, loaded but not playing.
+    if (SAVED && SAVED.current >= 0) {
+      var id = player.store.getState().playlist.trackOrder[SAVED.current];
+      if (id != null) player.store.dispatch({ type: 'BUFFER_TRACK', id: id });
+    }
+    var lastJson = '', timer = null, lastSkinImages = player.store.getState().display.skinImages;
+    player.store.subscribe(function () {
+      var st = player.store.getState();
+      // Skin: saved once it has actually loaded; back to the base skin clears it.
+      if (st.display.skinImages !== lastSkinImages) {
+        lastSkinImages = st.display.skinImages;
+        if (lastSkinImages === defaultSkinImages) {
+          if (savedSkin) { savedSkin = null; pendingSkin = null; post({ t: 'saveSkin', b64: null }); }
+        } else if (pendingSkin && pendingSkin !== savedSkin) {
+          savedSkin = pendingSkin;
+          post({ t: 'saveSkin', b64: savedSkin });
+        }
+      }
+      // The state changes constantly (scrolling title, time), so check at most
+      // once a second and only save when something we remember changed.
+      if (timer) return;
+      timer = setTimeout(function () {
+        timer = null;
+        var snap = snapshotState(), json = JSON.stringify(snap);
+        if (json !== lastJson) { lastJson = json; post({ t: 'saveState', state: snap }); }
+      }, 1000);
+    });
+  }
 
   // Send the current EQ settings to native (the player only pushes changes).
   function syncEq() {
@@ -777,6 +859,7 @@
     window.addEventListener('resize', layout);
     layout();
     syncEq();
+    startRemembering();
     post({ t: 'ready' });
   });
 })();

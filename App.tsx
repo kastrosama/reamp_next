@@ -16,6 +16,7 @@ import { STATIONS } from './src/stations';
 import { ReampEq, probeTracks, sliderToDb } from './modules/reamp-eq';
 import { handlePick } from './src/pickers';
 import { readOpened } from './src/openWith';
+import { loadSaved, saveSkin, saveState, SavedState } from './src/savedState';
 
 type WebMsg =
   | { t: 'ready' }
@@ -30,11 +31,21 @@ type WebMsg =
   | { t: 'enableVis' }
   | { t: 'eqBand'; i: number; v: number }
   | { t: 'eqPreamp'; v: number }
-  | { t: 'eqOn'; on: boolean };
+  | { t: 'eqOn'; on: boolean }
+  | { t: 'saveState'; state: SavedState }
+  | { t: 'saveSkin'; b64: string | null };
 
 // The player UI lives in the WebView; audio is played here, natively, so it keeps
 // running in the background with lock-screen / notification controls.
 const player = createAudioPlayer(null, { updateInterval: 500 });
+
+// Skin, playlist and window layout from last time (read once at startup).
+const saved = loadSaved();
+const injectedAtStart =
+  `window.__STATIONS = ${JSON.stringify(STATIONS)};` +
+  `window.__SAVED = ${JSON.stringify(saved.state)};` +
+  `window.__SAVED_SKIN = ${JSON.stringify(saved.skinB64)};` +
+  'true;';
 
 // Hook the native EQ onto the player's audio session. Retried until it
 // succeeds, because the session can be unavailable before first playback.
@@ -201,6 +212,12 @@ function Player() {
         });
         break;
       }
+      case 'saveState':
+        saveState(msg.state);
+        break;
+      case 'saveSkin':
+        saveSkin(msg.b64);
+        break;
       case 'eqBand':
         ReampEq.setBand(msg.i, sliderToDb(msg.v));
         break;
@@ -261,7 +278,7 @@ function Player() {
         setBuiltInZoomControls
         setDisplayZoomControls={false}
         overScrollMode="never"
-        injectedJavaScriptBeforeContentLoaded={`window.__STATIONS = ${JSON.stringify(STATIONS)}; true;`}
+        injectedJavaScriptBeforeContentLoaded={injectedAtStart}
         onMessage={onMessage}
         // Web links in the player (e.g. "Reamp..." in the long-press menu)
         // open in the phone's browser instead of replacing the player.
