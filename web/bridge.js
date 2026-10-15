@@ -1,4 +1,4 @@
-/* Runs inside the WebView. Webamp draws the UI; all audio is played natively
+/* Runs inside the WebView. the player engine draws the UI; all audio is played natively
  * (expo-audio) so it keeps going in the background and on the lock screen.
  *
  * Web -> native: window.ReactNativeWebView.postMessage(JSON)
@@ -12,10 +12,10 @@
   }
   window.onerror = function (m) { setStatus('error: ' + m); post({ t: 'log', msg: String(m) }); };
 
-  // --- Analyser for Webamp's visualizer, which only calls
+  // --- Analyser for the player's visualizer, which only calls
   // getByteTimeDomainData() and runs its own FFT on 1024 samples.
   //
-  // Instead of handing Webamp raw (noisy) audio every frame, we keep our own
+  // Instead of handing the player raw (noisy) audio every frame, we keep our own
   // set of smoothed band levels and synthesise a signal with exactly that
   // spectrum. That lets us control how the bars move: they rise at a moderate
   // pace and settle slowly, so the display follows the music without
@@ -58,7 +58,7 @@
     for (var b = 0; b < NB; b++) if (k < EDGES[b + 1]) return b;
     return NB - 1;
   }
-  // Webamp's display favours treble when every bin has equal energy, so
+  // The visualizer favours treble when every bin has equal energy, so
   // weight the synthesised bins to make equal levels look equal on screen.
   var TILT_EXP = window.__VIS_TILT || 0.6;
   var TILT = new Float32Array(N / 2);
@@ -68,7 +68,7 @@
 
   var RISE = 4;    // per second: how fast bars climb toward a new level
   var FALL = 1.6;  // per second: how fast they settle back down
-  var GAIN = window.__VIS_GAIN || 55; // overall height
+  var GAIN = window.__VIS_GAIN || 90; // overall height
 
   function FakeAnalyser() {
     this.fftSize = 2048;
@@ -103,7 +103,7 @@
     for (b = 0; b < NB; b++) {
       // Lift the treble a bit: real music's energy drops off steeply there.
       var tilt = 1 + 1.5 * b / (NB - 1);
-      var lvl = Math.min(1, Math.sqrt(e[b] * tilt / (this.agc * 2.2)) * 0.65);
+      var lvl = Math.min(1, Math.sqrt(e[b] * tilt / (this.agc * 2.2)) * 0.8);
       // Blend with the previous reading so one noisy snapshot can't yank a bar.
       this.target[b] = this.target[b] * 0.45 + lvl * 0.55;
     }
@@ -167,7 +167,7 @@
   FakeAnalyser.prototype.connect = function () {};
   FakeAnalyser.prototype.disconnect = function () {};
 
-  // --- IMedia implementation handed to Webamp via __customMediaClass.
+  // --- Media implementation handed to the player engine (__customMediaClass).
   function NativeMedia() {
     this._listeners = {};
     this._time = 0;
@@ -201,6 +201,8 @@
     this._duration = 0;
     this._loadedSent = false;
     post({ t: 'load', url: url, autoPlay: !!autoPlay, title: titleFor(url) });
+    currentUrl = url;
+    if (window.__autoEq) window.__autoEq();
     return Promise.resolve();
   };
   NativeMedia.prototype.getAnalyser = function () { return this._analyser; };
@@ -221,17 +223,18 @@
     this._emit('timeupdate');
     if (s.didJustFinish) this._emit('ended');
 
-    // Keep Webamp's buttons in sync when playback is changed from the lock
+    // Keep the player's buttons in sync when playback is changed from the lock
     // screen, headphones or notification.
-    if (window.__webamp) {
-      var ui = window.__webamp.getMediaStatus();
-      if (s.playing && ui !== 'PLAYING') window.__webamp.play();
-      if (!s.playing && ui === 'PLAYING' && s.externalPause) window.__webamp.pause();
+    if (window.__player) {
+      var ui = window.__player.getMediaStatus();
+      if (s.playing && ui !== 'PLAYING') window.__player.play();
+      if (!s.playing && ui === 'PLAYING' && s.externalPause) window.__player.pause();
     }
     setStatus(s.error ? 'stream error: ' + s.error : (s.isBuffering ? 'buffering…' : ''));
   };
 
   var stations = window.__STATIONS || [];
+  var currentUrl = null;
   function titleFor(url) {
     for (var i = 0; i < stations.length; i++) if (stations[i].url === url) return stations[i].name;
     return url;
@@ -264,7 +267,9 @@
   var H = window.innerHeight || 600;
   var extraHeight = Math.max(0, Math.floor((H - FULL * 3) / STEP));
 
-  var webamp = new Webamp({
+  // The engine (MIT, see THIRD_PARTY_NOTICES.md) exposes its constructor globally.
+  var Engine = window.Webamp;
+  var player = new Engine({
     initialTracks: stations.map(function (s) {
       return { url: s.url, duration: 0, metaData: { artist: s.genre || 'Radio', title: s.name } };
     }),
@@ -280,10 +285,10 @@
     },
     __customMediaClass: NativeMedia,
   });
-  window.__webamp = webamp;
+  window.__player = player;
 
   function layout() {
-    var store = webamp.store, st = store.getState(), w = st.windows.genWindows;
+    var store = player.store, st = store.getState(), w = st.windows.genWindows;
     var H = window.innerHeight;
     var main = w.main, eq = w.equalizer, pl = w.playlist;
     var hMain = main.open ? (main.shade ? SHADE : FULL) : 0;
@@ -315,21 +320,79 @@
     if (moved) store.dispatch({ type: 'UPDATE_WINDOW_POSITIONS', positions: want, absolute: true });
   }
 
-  // Send the current EQ settings to native (Webamp only pushes changes).
+  // --- EQ "Auto": pick a preset from the station's genre whenever the
+  // station changes (or Auto is switched on). Winamp's built-in presets,
+  // values are [preamp, 60, 170, 310, 600, 1k, 3k, 6k, 12k, 14k, 16k] on
+  // Winamp's 1..64 scale.
+  var PRESETS = {"Classical": [33, 33, 33, 33, 33, 33, 33, 20, 20, 20, 16], "Club": [33, 33, 33, 38, 42, 42, 42, 38, 33, 33, 33], "Dance": [33, 48, 44, 36, 32, 32, 22, 20, 20, 32, 32], "Laptop speakers/headphones": [33, 40, 50, 41, 26, 28, 35, 40, 48, 53, 56], "Large hall": [33, 49, 49, 42, 42, 33, 24, 24, 24, 33, 33], "Party": [33, 44, 44, 33, 33, 33, 33, 33, 33, 44, 44], "Pop": [33, 29, 40, 44, 45, 41, 30, 28, 28, 29, 29], "Reggae": [33, 33, 33, 31, 22, 33, 43, 43, 33, 33, 33], "Rock": [33, 45, 40, 23, 19, 26, 39, 47, 50, 50, 50], "Soft": [33, 40, 35, 30, 28, 30, 39, 46, 48, 50, 52], "Ska": [33, 28, 24, 25, 31, 39, 42, 47, 48, 50, 48], "Full Bass": [33, 48, 48, 48, 42, 35, 25, 18, 15, 14, 14], "Soft Rock": [33, 39, 39, 36, 31, 25, 23, 26, 31, 37, 47], "Full Treble": [33, 16, 16, 16, 25, 37, 50, 58, 58, 58, 60], "Full Bass & Treble": [33, 44, 42, 33, 20, 24, 35, 46, 50, 52, 52], "Live": [33, 24, 33, 39, 41, 42, 42, 39, 37, 37, 36], "Techno": [33, 45, 42, 33, 23, 24, 33, 45, 48, 48, 47]};
+  var GENRE_PRESETS = [
+    [/techno|house|trance|edm|electro|drum|dnb|d&b|dubstep|breaks|garage/, 'Techno'],
+    [/dance|club|disco/, 'Dance'],
+    [/hip ?hop|hip-hop|rap|r&b|rnb|urban|trap|bass/, 'Full Bass'],
+    [/metal|punk|grunge|hard rock/, 'Rock'],
+    [/soft rock|classic rock|oldies/, 'Soft Rock'],
+    [/rock|alternative/, 'Rock'],
+    [/indie|pop|top ?40|hits|chart/, 'Pop'],
+    [/ska/, 'Ska'],
+    [/reggae|dub|dancehall/, 'Reggae'],
+    [/classical|orchestra|opera|baroque|symphon/, 'Classical'],
+    [/ambient|drone|space|new age|meditation|sleep/, 'Large hall'],
+    [/jazz|lounge|soul|blues|acoustic|folk|easy|chill|downtempo|lo-?fi/, 'Soft'],
+    [/live|concert/, 'Live'],
+    [/party/, 'Party'],
+  ];
+  var BAND_KEYS = ['preamp'].concat(BANDS);
+
+  function genreFor(url) {
+    for (var i = 0; i < stations.length; i++) {
+      if (stations[i].url === url) return (stations[i].genre || '') + ' ' + stations[i].name;
+    }
+    return '';
+  }
+  function presetForGenre(text) {
+    var g = (text || '').toLowerCase();
+    // Talk/news stations and anything unrecognised get a flat EQ.
+    if (/talk|news|sport|speech|podcast/.test(g)) return null;
+    for (var i = 0; i < GENRE_PRESETS.length; i++) {
+      if (GENRE_PRESETS[i][0].test(g)) return GENRE_PRESETS[i][1];
+    }
+    return null;
+  }
+  var statusTimer = null;
+  function flash(msg) {
+    setStatus(msg);
+    clearTimeout(statusTimer);
+    statusTimer = setTimeout(function () { setStatus(''); }, 2500);
+  }
+  window.__autoEq = function () {
+    if (!player || !player.store) return;
+    var st = player.store.getState();
+    if (!st.equalizer.auto || !currentUrl) return;
+    var name = presetForGenre(genreFor(currentUrl));
+    var vals = name ? PRESETS[name] : null;
+    BAND_KEYS.forEach(function (key, i) {
+      // Winamp 1..64 -> slider 0..100; flat = 50.
+      var v = vals ? Math.round(((vals[i] - 1) / 63) * 100) : 50;
+      player.store.dispatch({ type: 'SET_BAND_VALUE', band: key, value: v });
+    });
+    flash('Auto EQ: ' + (name || 'Flat'));
+  };
+
+  // Send the current EQ settings to native (the player only pushes changes).
   function syncEq() {
-    var eq = webamp.store.getState().equalizer;
+    var eq = player.store.getState().equalizer;
     post({ t: 'eqOn', on: !!eq.on });
     post({ t: 'eqPreamp', v: eq.sliders.preamp });
     BANDS.forEach(function (b, i) { post({ t: 'eqBand', i: i, v: eq.sliders[b] }); });
   }
 
-  // Keep every Webamp menu (presets, options, playlist buttons) and its
+  // Keep every player menu (presets, options, playlist buttons) and its
   // sub-menus fully on screen. Sub-menus open on hover/tap via CSS, so we
   // check every frame while a menu is open and nudge anything that pokes
   // out back inside the window.
   function fitMenus() {
-    // Webamp creates a separate container for every menu, all with the same
-    // id, so select them all rather than using getElementById.
+    // The engine creates a separate container for every menu, all with the
+    // same (engine-defined) id, so select them all rather than using getElementById.
     var menus = document.querySelectorAll('[id="webamp-context-menu"] ul, ul.context-menu');
     if (menus.length) {
       var W = document.documentElement.clientWidth, H = window.innerHeight, M = 1;
@@ -350,10 +413,14 @@
   }
   requestAnimationFrame(fitMenus);
 
-  webamp.renderWhenReady(document.getElementById('app')).then(function () {
+  player.renderWhenReady(document.getElementById('app')).then(function () {
     setStatus('');
     var busy = false;
-    webamp.store.subscribe(function () {
+    var wasAuto = player.store.getState().equalizer.auto;
+    player.store.subscribe(function () {
+      var auto = player.store.getState().equalizer.auto;
+      if (auto && !wasAuto) { wasAuto = auto; window.__autoEq(); }
+      wasAuto = auto;
       if (busy) return;
       busy = true;
       try { layout(); } finally { busy = false; }

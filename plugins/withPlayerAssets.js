@@ -1,9 +1,10 @@
-// Copies the WebView player (web/) plus the Webamp bundle into the Android
+// Copies the WebView player (web/) plus the player engine into the Android
 // assets folder during `expo prebuild`, so the WebView can load it from
 // file:///android_asset/web/index.html with no network or dev server.
 const fs = require('fs');
 const path = require('path');
 const { withDangerousMod } = require('expo/config-plugins');
+const { patchPlayer } = require('./patchPlayer');
 
 function copyDir(src, dest) {
   fs.mkdirSync(dest, { recursive: true });
@@ -15,16 +16,25 @@ function copyDir(src, dest) {
   }
 }
 
-module.exports = function withWebampAssets(config) {
+/** Writes the patched, rebranded player engine to `dest/player.js`. */
+function writePlayerEngine(root, dest) {
+  // The engine is the `webamp` npm package (MIT); see THIRD_PARTY_NOTICES.md.
+  const engine = require.resolve('webamp', { paths: [root] }); // UMD build
+  fs.writeFileSync(path.join(dest, 'player.js'), patchPlayer(fs.readFileSync(engine, 'utf8')));
+}
+
+function withPlayerAssets(config) {
   return withDangerousMod(config, [
     'android',
     async (cfg) => {
       const root = cfg.modRequest.projectRoot;
       const dest = path.join(cfg.modRequest.platformProjectRoot, 'app', 'src', 'main', 'assets', 'web');
       copyDir(path.join(root, 'web'), dest);
-      const bundle = require.resolve('webamp', { paths: [root] }); // -> built/webamp.bundle.min.js (UMD)
-      fs.copyFileSync(bundle, path.join(dest, 'webamp.bundle.min.js'));
+      writePlayerEngine(root, dest);
       return cfg;
     },
   ]);
-};
+}
+
+module.exports = withPlayerAssets;
+module.exports.writePlayerEngine = writePlayerEngine;

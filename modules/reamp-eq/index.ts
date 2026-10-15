@@ -14,7 +14,7 @@ const native = requireOptionalNativeModule<ReampEqNative>('ReampEq');
 /** Winamp's band order: 60, 170, 310, 600, 1k, 3k, 6k, 12k, 14k, 16k Hz. */
 export const EQ_BANDS = [60, 170, 310, 600, 1000, 3000, 6000, 12000, 14000, 16000] as const;
 
-/** Webamp sliders are 0..100 with 50 = 0 dB, spanning -12..+12 dB. */
+/** Player EQ sliders are 0..100 with 50 = 0 dB, spanning -12..+12 dB. */
 export const sliderToDb = (v: number) => (v / 100) * 24 - 12;
 
 export const ReampEq = {

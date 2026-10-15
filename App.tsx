@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { AppState, StyleSheet, View } from 'react-native';
+import { AppState, Linking, StyleSheet, View } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
@@ -29,7 +29,7 @@ type WebMsg =
   | { t: 'eqPreamp'; v: number }
   | { t: 'eqOn'; on: boolean };
 
-// Webamp UI lives in the WebView; audio is played here, natively, so it keeps
+// The player UI lives in the WebView; audio is played here, natively, so it keeps
 // running in the background with lock-screen / notification controls.
 const player = createAudioPlayer(null, { updateInterval: 500 });
 
@@ -180,7 +180,7 @@ function Player() {
         askForRealVisualizer();
         break;
       case 'log':
-        console.log('[webamp]', msg.msg);
+        console.log('[player]', msg.msg);
         break;
     }
   };
@@ -201,6 +201,16 @@ function Player() {
         overScrollMode="never"
         injectedJavaScriptBeforeContentLoaded={`window.__STATIONS = ${JSON.stringify(STATIONS)}; true;`}
         onMessage={onMessage}
+        // Web links in the player (e.g. "Reamp..." in the long-press menu)
+        // open in the phone's browser instead of replacing the player.
+        setSupportMultipleWindows={false}
+        onShouldStartLoadWithRequest={(req) => {
+          if (/^https?:/i.test(req.url)) {
+            Linking.openURL(req.url).catch(() => {});
+            return false;
+          }
+          return true;
+        }}
       />
     </View>
   );
