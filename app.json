@@ -29,7 +29,8 @@
           "microphonePermission": "Reamp uses audio access only to animate the visualizer. Nothing is recorded."
         }
       ],
-      "./plugins/withPlayerAssets"
+      "./plugins/withPlayerAssets",
+      "./plugins/withOpenWith"
     ]
   }
 }

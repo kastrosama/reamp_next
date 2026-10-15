@@ -15,6 +15,7 @@ import {
 import { STATIONS } from './src/stations';
 import { ReampEq, probeTracks, sliderToDb } from './modules/reamp-eq';
 import { handlePick } from './src/pickers';
+import { readOpened } from './src/openWith';
 
 type WebMsg =
   | { t: 'ready' }
@@ -66,6 +67,50 @@ function Player() {
     webRef.current?.injectJavaScript(
       `window.__fromNative && window.__fromNative(${JSON.stringify(payload)}); true;`,
     );
+
+  // Reads lengths and tags for local files and sends them to the playlist.
+  const sendTrackInfo = async (urls: string[]) => {
+    const local = urls.filter((u) => !/^https?:/i.test(u));
+    for (let i = 0; i < local.length; i += 25) {
+      try {
+        const items = await probeTracks(local.slice(i, i + 25));
+        if (items.length) send({ t: 'meta', items });
+      } catch {
+        // Unreadable files just keep their file name.
+      }
+    }
+  };
+
+  // --- Files opened from other apps ("Open with" / default player).
+  // Queued until the player page is ready (e.g. when it launched the app).
+  const playerReady = useRef(false);
+  const openQueue = useRef<string[]>([]);
+  const handleOpened = async (uri: string) => {
+    try {
+      const opened = await readOpened(uri);
+      if (opened.kind === 'skin') {
+        send({ t: 'openSkin', name: opened.name, b64: opened.b64 });
+      } else if (opened.kind === 'audio' || opened.kind === 'playlist') {
+        if (!opened.items.length) return;
+        // Added to the end of the playlist and played (keeps what was there).
+        send({ t: 'openFiles', items: opened.items });
+        sendTrackInfo(opened.items.map((it) => it.url));
+      }
+    } catch (e) {
+      console.warn('[open-with]', e);
+    }
+  };
+  const openUri = (uri: string | null) => {
+    if (!uri) return;
+    if (playerReady.current) handleOpened(uri);
+    else openQueue.current.push(uri);
+  };
+  useEffect(() => {
+    Linking.getInitialURL().then(openUri).catch(() => {});
+    const sub = Linking.addEventListener('url', ({ url }) => openUri(url));
+    return () => sub.remove();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Real visualizer: Android's Visualizer API needs the RECORD_AUDIO
   // permission even though nothing is recorded. Opt-in, from a tap.
@@ -149,18 +194,10 @@ function Player() {
         break;
       case 'pickFiles': {
         const { id, accept, directory } = msg;
-        handlePick(accept, directory).then(async (res) => {
+        handlePick(accept, directory).then((res) => {
           // Show the files straight away, then fill in lengths and tags.
           send({ t: 'picked', id, ...res });
-          const urls = (res.items ?? []).map((it) => it.url);
-          for (let i = 0; i < urls.length; i += 25) {
-            try {
-              const items = await probeTracks(urls.slice(i, i + 25));
-              if (items.length) send({ t: 'meta', items });
-            } catch {
-              // Unreadable files just keep their file name.
-            }
-          }
+          sendTrackInfo((res.items ?? []).map((it) => it.url));
         });
         break;
       }
@@ -192,6 +229,8 @@ function Player() {
         if (player.duration > 0) player.seekTo((player.duration * msg.percent) / 100).catch(() => {});
         break;
       case 'ready':
+        playerReady.current = true;
+        openQueue.current.splice(0).forEach(handleOpened);
         // Re-enable the real visualizer if access was allowed before.
         getRecordingPermissionsAsync()
           .then(({ granted }) => granted && startRealVisualizer())

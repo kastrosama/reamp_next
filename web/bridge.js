@@ -311,16 +311,48 @@
     });
   }
 
+  // --- Opened from another app: add to the end of the playlist and play
+  // the first one (keeps whatever was already there).
+  function openFiles(items) {
+    var p = window.__player;
+    if (!p || !items.length) return;
+    var before = p.store.getState().playlist.trackOrder.length;
+    p.appendTracks(items.map(function (it) {
+      var t = { url: it.url, defaultName: it.name };
+      // Radio entries from playlist files: name them, and don't try to
+      // measure the length of an endless stream.
+      if (it.live) { t.duration = 0; t.metaData = { artist: '', title: it.name }; }
+      return t;
+    }));
+    var st = p.store.getState(), id = st.playlist.trackOrder[before];
+    if (id != null) {
+      p.store.dispatch({ type: 'CLICKED_TRACK', index: before });
+      p.store.dispatch({ type: 'PLAY_TRACK', id: id });
+    }
+  }
+  // A .wsz skin opened from another app.
+  function openSkin(msg) {
+    var p = window.__player;
+    if (!p || !msg.b64) return;
+    var bin = atob(msg.b64), bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    p.setSkinFromUrl(URL.createObjectURL(new Blob([bytes], { type: 'application/zip' })));
+  }
+
   var realVis = false;
   window.__fromNative = function (msg) {
     if (msg.t === 'picked') return onPicked(msg);
     if (msg.t === 'meta') return onMeta(msg.items || []);
+    if (msg.t === 'openFiles') return openFiles(msg.items || []);
+    if (msg.t === 'openSkin') return openSkin(msg);
     var m = window.__nativeMedia;
     if (!m) return;
     if (msg.t === 'status') m._onStatus(msg);
     else if (msg.t === 'samples') m._analyser.setReal(msg.d);
     else if (msg.t === 'picked') onPicked(msg);
     else if (msg.t === 'meta') onMeta(msg.items || []);
+    else if (msg.t === 'openFiles') openFiles(msg.items || []);
+    else if (msg.t === 'openSkin') openSkin(msg);
     else if (msg.t === 'visEnabled') realVis = true; // asked once; taps go back to Winamp
   };
 
