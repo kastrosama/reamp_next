@@ -290,14 +290,37 @@
     resolve(refs);
   }
 
+  // Lengths and tags read natively for picked files: shown in the playlist
+  // (and main display) before anything is played, like Winamp.
+  function onMeta(items) {
+    var p = window.__player;
+    if (!p || !p.store) return;
+    var tracks = p.store.getState().tracks, byUrl = {};
+    for (var id in tracks) byUrl[tracks[id].url] = id;
+    items.forEach(function (m) {
+      var tid = byUrl[m.url];
+      if (tid == null) return;
+      if (m.duration > 0) p.store.dispatch({ type: 'SET_MEDIA_DURATION', id: Number(tid), duration: m.duration });
+      if (m.title || m.artist) {
+        p.store.dispatch({
+          type: 'SET_MEDIA_TAGS', id: Number(tid),
+          title: m.title || '', artist: m.artist || '', album: m.album || null, albumArtUrl: null,
+          bitrate: m.bitrate || null, sampleRate: m.sampleRate || null, numberOfChannels: null,
+        });
+      }
+    });
+  }
+
   var realVis = false;
   window.__fromNative = function (msg) {
     if (msg.t === 'picked') return onPicked(msg);
+    if (msg.t === 'meta') return onMeta(msg.items || []);
     var m = window.__nativeMedia;
     if (!m) return;
     if (msg.t === 'status') m._onStatus(msg);
     else if (msg.t === 'samples') m._analyser.setReal(msg.d);
     else if (msg.t === 'picked') onPicked(msg);
+    else if (msg.t === 'meta') onMeta(msg.items || []);
     else if (msg.t === 'visEnabled') realVis = true; // asked once; taps go back to Winamp
   };
 
@@ -496,8 +519,9 @@
     }
     // Not zoomed: deliver the double-tap to the player as a double-click
     // (e.g. shade a window by double-tapping its title bar, like Winamp).
+    // The playlist's track list handles its own taps (see below).
     var target = document.elementFromPoint(p.clientX, p.clientY);
-    if (target) {
+    if (target && !target.closest('.playlist-tracks')) {
       target.dispatchEvent(new MouseEvent('dblclick', {
         bubbles: true, cancelable: true, view: window, clientX: p.clientX, clientY: p.clientY,
         __reamp: true,
@@ -508,6 +532,202 @@
   // nothing happens twice.
   document.addEventListener('dblclick', function (e) {
     if (e.isTrusted && Date.now() - ownDbl < 600) { e.stopPropagation(); e.preventDefault(); }
+  }, true);
+
+  // --- Two-finger gestures belong to zoom only. The first finger may already
+  // have started something (dragging a window, a slider, a track); as soon
+  // as a second finger lands we end it, put back anything it changed, and
+  // keep the player from seeing the rest of the gesture.
+  var multi = false, multiEndedAt = 0, firstTouch = null;
+  function snapshot() {
+    var p = window.__player;
+    if (!p || !p.store) return null;
+    var st = p.store.getState();
+    return { at: Date.now(), volume: st.media.volume, balance: st.media.balance,
+      sliders: Object.assign({}, st.equalizer.sliders), selected: st.playlist.selectedTracks.slice() };
+  }
+  function restore(snap) {
+    var p = window.__player;
+    if (!snap || !p) return;
+    var st = p.store.getState();
+    if (st.media.volume !== snap.volume) p.store.dispatch({ type: 'SET_VOLUME', volume: snap.volume });
+    if (st.media.balance !== snap.balance) p.store.dispatch({ type: 'SET_BALANCE', balance: snap.balance });
+    Object.keys(snap.sliders).forEach(function (k) {
+      if (st.equalizer.sliders[k] !== snap.sliders[k]) {
+        p.store.dispatch({ type: 'SET_BAND_VALUE', band: k === 'preamp' ? 'preamp' : Number(k), value: snap.sliders[k] });
+      }
+    });
+  }
+  function endEngineDrags() {
+    // The engine ends drags on these; synthetic copies stop anything in progress.
+    window.dispatchEvent(new Event('touchend'));
+    window.dispatchEvent(new MouseEvent('mouseup'));
+    document.dispatchEvent(new PointerEvent('pointerup'));
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  }
+  window.addEventListener('touchstart', function (e) {
+    if (!e.touches) return;
+    if (e.touches.length === 1 && !multi) { firstTouch = snapshot(); return; }
+    if (e.touches.length >= 2) {
+      if (!multi) {
+        multi = true;
+        cancelPlaylistGesture();
+        endEngineDrags();
+        if (firstTouch && Date.now() - firstTouch.at < 1500) restore(firstTouch);
+      }
+      e.stopImmediatePropagation();
+    }
+  }, { capture: true, passive: true });
+  ['touchmove', 'touchend', 'touchcancel', 'pointermove', 'pointerup', 'pointerdown', 'mousedown', 'mouseup', 'click', 'contextmenu'].forEach(function (type) {
+    window.addEventListener(type, function (e) {
+      if (multi || Date.now() - multiEndedAt < 400) {
+        e.stopImmediatePropagation();
+        if (type === 'click' || type === 'contextmenu') e.preventDefault();
+      }
+      if ((type === 'touchend' || type === 'touchcancel') && multi && e.isTrusted && e.touches && e.touches.length === 0) {
+        multi = false;
+        multiEndedAt = Date.now();
+      }
+    }, { capture: true, passive: false });
+  });
+
+  // --- Playlist touch, phone style (instead of the desktop mouse behaviour):
+  //   swipe          scroll (row by row, like Winamp), with a little momentum
+  //   tap            select a track
+  //   double-tap     play it
+  //   hold + drag    move the selected track(s) up or down
+  //   hold + release open the long-press menu
+  var TRACK_H = 13, HOLD_MS = 450, MOVE_PX = 6;
+  var pg = null, momentum = null, lastTrackTap = { t: 0, index: -1 };
+
+  function plState() { return window.__player.store.getState(); }
+  function visibleRows() {
+    var size = plState().windows.genWindows.playlist.size || [0, 0];
+    return Math.floor((58 + 29 * size[1]) / TRACK_H);
+  }
+  function scrollOffset() {
+    var st = plState(), overflow = Math.max(0, st.playlist.trackOrder.length - visibleRows());
+    return overflow ? Math.round((st.display.playlistScrollPosition / 100) * overflow) : 0;
+  }
+  function setScrollOffset(off) {
+    var st = plState(), overflow = Math.max(0, st.playlist.trackOrder.length - visibleRows());
+    if (!overflow) return false;
+    var clamped = Math.max(0, Math.min(overflow, off));
+    window.__player.store.dispatch({ type: 'SET_PLAYLIST_SCROLL_POSITION', position: (clamped / overflow) * 100 });
+    return clamped === off;
+  }
+  function rowAt(clientY) {
+    var box = document.querySelector('#playlist-window .playlist-tracks');
+    if (!box) return -1;
+    var r = box.getBoundingClientRect();
+    return Math.floor((clientY - r.top) / TRACK_H) + scrollOffset();
+  }
+  function selectRow(index) {
+    var st = plState();
+    if (index >= 0 && index < st.playlist.trackOrder.length) {
+      window.__player.store.dispatch({ type: 'CLICKED_TRACK', index: index });
+      return st.playlist.trackOrder[index];
+    }
+    window.__player.store.dispatch({ type: 'SELECT_ZERO' });
+    return null;
+  }
+  function moveSelected(rows) {
+    var st = plState(), order = st.playlist.trackOrder, sel = st.playlist.selectedTracks;
+    var first = -1, last = -1;
+    order.forEach(function (id, i) { if (sel.indexOf(id) !== -1) { if (first < 0) first = i; last = i; } });
+    if (first < 0) return 0;
+    var off = Math.max(-first, Math.min(order.length - 1 - last, rows));
+    if (off) window.__player.store.dispatch({ type: 'DRAG_SELECTED', offset: off });
+    return off;
+  }
+  function cancelPlaylistGesture() {
+    if (pg && pg.timer) clearTimeout(pg.timer);
+    pg = null;
+  }
+  function stopMomentum() { if (momentum) { cancelAnimationFrame(momentum); momentum = null; } }
+
+  window.addEventListener('touchstart', function (e) {
+    if (multi || !e.touches || e.touches.length !== 1) return;
+    var cell = e.target.closest && e.target.closest('#playlist-window .playlist-tracks');
+    if (!cell) return;
+    e.stopImmediatePropagation(); // keep the engine's drag-to-reorder out of it
+    stopMomentum();
+    var t = e.touches[0];
+    pg = { x0: t.clientX, y0: t.clientY, y: t.clientY, t0: Date.now(), mode: 'pending',
+      row: rowAt(t.clientY), startOffset: scrollOffset(), moved: 0, samples: [[Date.now(), t.clientY]] };
+    pg.timer = setTimeout(function () {
+      if (!pg || pg.mode !== 'pending') return;
+      pg.mode = 'held';
+      var st = plState(), id = st.playlist.trackOrder[pg.row];
+      if (id != null && st.playlist.selectedTracks.indexOf(id) === -1) selectRow(pg.row);
+    }, HOLD_MS);
+  }, { capture: true, passive: true });
+
+  window.addEventListener('touchmove', function (e) {
+    if (!pg || multi) return;
+    e.stopImmediatePropagation();
+    var t = e.touches[0], dy = t.clientY - pg.y0;
+    pg.y = t.clientY;
+    pg.samples.push([Date.now(), t.clientY]);
+    if (pg.samples.length > 6) pg.samples.shift();
+    if (pg.mode === 'pending' && (Math.abs(dy) > MOVE_PX || Math.abs(t.clientX - pg.x0) > MOVE_PX)) {
+      clearTimeout(pg.timer);
+      pg.mode = 'scroll';
+    } else if (pg.mode === 'held' && Math.abs(dy) > MOVE_PX) {
+      pg.mode = 'reorder';
+    }
+    if (pg.mode === 'scroll') {
+      setScrollOffset(pg.startOffset - Math.round(dy / TRACK_H));
+    } else if (pg.mode === 'reorder') {
+      var want = Math.round(dy / TRACK_H);
+      if (want !== pg.moved) pg.moved += moveSelected(want - pg.moved);
+    }
+  }, { capture: true, passive: true });
+
+  window.addEventListener('touchend', function (e) {
+    if (!pg || !e.isTrusted) return;
+    var g = pg;
+    cancelPlaylistGesture();
+    if (multi) return;
+    e.stopImmediatePropagation();
+    e.preventDefault(); // no emulated mouse clicks afterwards
+    if (g.mode === 'pending') {
+      // Tap / double-tap.
+      var now = Date.now();
+      var dbl = now - lastTrackTap.t < 350 && lastTrackTap.index === g.row;
+      lastTrackTap = { t: dbl ? 0 : now, index: g.row };
+      var id = selectRow(g.row);
+      if (dbl && id != null && !isZoomed()) window.__player.store.dispatch({ type: 'PLAY_TRACK', id: id });
+    } else if (g.mode === 'held') {
+      // Held without moving: the long-press menu, at the finger.
+      var el = document.elementFromPoint(g.x0, g.y0);
+      if (el) el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: g.x0, clientY: g.y0, view: window }));
+    } else if (g.mode === 'scroll') {
+      // Momentum: keep going at the release speed, slowing down.
+      var a = g.samples[0], b = g.samples[g.samples.length - 1];
+      var v = (b[1] - a[1]) / Math.max(1, b[0] - a[0]); // px per ms
+      if (Math.abs(v) > 0.25) {
+        var pos = scrollOffset() * TRACK_H, last = performance.now();
+        var step = function (ts) {
+          var dt = ts - last; last = ts;
+          pos -= v * dt;
+          v *= Math.pow(0.996, dt);
+          var inRange = setScrollOffset(Math.round(pos / TRACK_H));
+          momentum = (inRange && Math.abs(v) > 0.03) ? requestAnimationFrame(step) : null;
+        };
+        momentum = requestAnimationFrame(step);
+      }
+    }
+  }, { capture: true, passive: false });
+
+  // Android's own long-press would open the menu while the finger is still
+  // down (and before we know whether it's a drag). Over the track list we
+  // open it ourselves on release instead.
+  window.addEventListener('contextmenu', function (e) {
+    if (e.isTrusted && e.target.closest && e.target.closest('#playlist-window .playlist-tracks')) {
+      e.stopImmediatePropagation();
+      e.preventDefault();
+    }
   }, true);
 
   player.renderWhenReady(document.getElementById('app')).then(function () {

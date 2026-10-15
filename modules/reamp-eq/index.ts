@@ -24,3 +24,19 @@ export const ReampEq = {
   setPreamp: (db: number) => native?.setPreamp(db),
   setEnabled: (on: boolean) => native?.setEnabled(on),
 };
+
+// --- Track info for local files (length + tags), read natively.
+export type TrackMeta = {
+  url: string;
+  duration?: number | null;
+  title?: string | null;
+  artist?: string | null;
+  album?: string | null;
+  bitrate?: number | null;
+  sampleRate?: number | null;
+};
+const media = requireOptionalNativeModule<{ probe(uris: string[]): Promise<TrackMeta[]> }>('ReampMedia');
+
+/** Reads lengths and tags for local files. Returns [] if unavailable. */
+export const probeTracks = (uris: string[]): Promise<TrackMeta[]> =>
+  media ? media.probe(uris) : Promise.resolve([]);

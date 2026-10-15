@@ -1,6 +1,11 @@
 {
-  "platforms": ["android"],
+  "platforms": [
+    "android"
+  ],
   "android": {
-    "modules": ["expo.modules.reampeq.ReampEqModule"]
+    "modules": [
+      "expo.modules.reampeq.ReampEqModule",
+      "expo.modules.reampeq.ReampMediaModule"
+    ]
   }
 }

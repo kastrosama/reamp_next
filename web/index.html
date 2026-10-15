@@ -10,6 +10,10 @@
     body { -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
     /* Pinch-zoom yes; the browser's own double-tap zoom no (we handle double-tap). */
     html, body { touch-action: pan-x pan-y pinch-zoom; }
+    /* The engine marks every window (and slider) "touch-action: none", which
+       blocks pinch-zoom everywhere. Allow pinch only: one-finger drags still
+       go to the player, two fingers zoom. */
+    #webamp [style*="touch-action"], #webamp input { touch-action: pinch-zoom !important; }
     #app { position: absolute; inset: 0; }
     #status { position: fixed; bottom: 4px; left: 0; right: 0; text-align: center;
       font: 8px monospace; color: #3a6; opacity: .8; pointer-events: none; }

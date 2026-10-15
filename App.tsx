@@ -13,7 +13,7 @@ import {
   setAudioModeAsync,
 } from 'expo-audio';
 import { STATIONS } from './src/stations';
-import { ReampEq, sliderToDb } from './modules/reamp-eq';
+import { ReampEq, probeTracks, sliderToDb } from './modules/reamp-eq';
 import { handlePick } from './src/pickers';
 
 type WebMsg =
@@ -149,7 +149,19 @@ function Player() {
         break;
       case 'pickFiles': {
         const { id, accept, directory } = msg;
-        handlePick(accept, directory).then((res) => send({ t: 'picked', id, ...res }));
+        handlePick(accept, directory).then(async (res) => {
+          // Show the files straight away, then fill in lengths and tags.
+          send({ t: 'picked', id, ...res });
+          const urls = (res.items ?? []).map((it) => it.url);
+          for (let i = 0; i < urls.length; i += 25) {
+            try {
+              const items = await probeTracks(urls.slice(i, i + 25));
+              if (items.length) send({ t: 'meta', items });
+            } catch {
+              // Unreadable files just keep their file name.
+            }
+          }
+        });
         break;
       }
       case 'eqBand':
