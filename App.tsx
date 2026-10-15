@@ -17,11 +17,13 @@ import { ReampEq, probeTracks, sliderToDb } from './modules/reamp-eq';
 import { handlePick } from './src/pickers';
 import { readOpened } from './src/openWith';
 import { loadSaved, saveSkin, saveState, SavedState } from './src/savedState';
+import { emptyQueue, nextInQueue, Queue } from './src/queue';
 
 type WebMsg =
   | { t: 'ready' }
   | { t: 'log'; msg: string }
-  | { t: 'load'; url: string; autoPlay: boolean; title: string; artist?: string; live?: boolean }
+  | { t: 'load'; url: string; autoPlay: boolean; title: string; artist?: string; live?: boolean; id?: number | null }
+  | ({ t: 'queue' } & Queue)
   | { t: 'pickFiles'; id: number; accept: string | null; directory: boolean }
   | { t: 'play' }
   | { t: 'pause' }
@@ -57,6 +59,30 @@ const attachEq = () => {
     .catch(() => {});
 };
 
+// Starts a track natively. The lock screen / car media session is only
+// (re)built when it has to be (first track, or switching between radio and
+// files); otherwise just its title changes. Rebuilding it on every song made
+// the car see the player disappear and come back.
+let lockScreenLive: boolean | null = null;
+function loadNative(url: string, title: string, artist: string | undefined, live: boolean, autoPlay: boolean) {
+  player.replace({ uri: url });
+  const meta = { title, artist: artist || 'Reamp' };
+  if (lockScreenLive !== live) {
+    lockScreenLive = live;
+    player.setActiveForLockScreen(
+      true,
+      meta,
+      live
+        ? { isLiveStream: true, showSeekForward: false, showSeekBackward: false }
+        : { isLiveStream: false, showSeekForward: true, showSeekBackward: true },
+    );
+  } else {
+    player.updateLockScreenMetadata(meta);
+  }
+  if (autoPlay) player.play();
+  attachEq();
+}
+
 export default function App() {
   return (
     <SafeAreaProvider>
@@ -73,6 +99,10 @@ function Player() {
   // apart from pauses coming from the lock screen or headphones.
   const lastWebCommandAt = useRef(0);
   const wasPlaying = useRef(false);
+  // Native copy of the playlist (see src/queue.ts) and when we last moved on
+  // to the next song ourselves.
+  const queue = useRef<Queue>(emptyQueue);
+  const nativeAdvanceAt = useRef(0);
 
   const send = (payload: object) =>
     webRef.current?.injectJavaScript(
@@ -165,6 +195,25 @@ function Player() {
         wasPlaying.current && !s.playing && !s.isBuffering && !s.didJustFinish && !recentWebCommand;
       wasPlaying.current = s.playing;
       if (s.playing) attachEq();
+      // Song finished: start the next one right now, here, rather than waiting
+      // for the player screen (which may be asleep) to ask for it.
+      let finished = s.didJustFinish;
+      if (finished && Date.now() - nativeAdvanceAt.current > 1500) {
+        const next = nextInQueue(queue.current);
+        if (next) {
+          const now = Date.now();
+          nativeAdvanceAt.current = now;
+          lastWebCommandAt.current = now;
+          titleRef.current = next.title;
+          queue.current = { ...queue.current, current: next.id };
+          loadNative(next.url, next.title, next.artist, next.live, true);
+          // The player screen just follows along (and doesn't load it again).
+          send({ t: 'advanced', id: next.id, url: next.url });
+          finished = false;
+        }
+      } else if (finished) {
+        finished = false; // already moved on
+      }
       const payload = {
         t: 'status',
         playing: s.playing,
@@ -172,7 +221,7 @@ function Player() {
         isLoaded: s.isLoaded,
         currentTime: s.currentTime,
         duration: s.isLive ? 0 : s.duration,
-        didJustFinish: s.didJustFinish,
+        didJustFinish: finished,
         error: s.error,
         externalPause,
       };
@@ -192,17 +241,21 @@ function Player() {
       case 'load':
         lastWebCommandAt.current = Date.now();
         titleRef.current = msg.title;
-        player.replace({ uri: msg.url });
-        player.setActiveForLockScreen(
-          true,
-          { title: msg.title, artist: msg.artist || 'Reamp' },
-          msg.live === false
-            ? { isLiveStream: false, showSeekForward: true, showSeekBackward: true }
-            : { isLiveStream: true, showSeekForward: false, showSeekBackward: false },
-        );
-        if (msg.autoPlay) player.play();
-        attachEq();
+        if (msg.id != null) queue.current = { ...queue.current, current: msg.id };
+        loadNative(msg.url, msg.title, msg.artist, msg.live !== false, msg.autoPlay);
         break;
+      case 'queue': {
+        // Right after we moved on ourselves, the screen may still report the
+        // old track as current for a moment; keep ours.
+        const keep = Date.now() - nativeAdvanceAt.current < 1500;
+        queue.current = {
+          items: msg.items,
+          current: keep ? queue.current.current : msg.current,
+          shuffle: msg.shuffle,
+          repeat: msg.repeat,
+        };
+        break;
+      }
       case 'pickFiles': {
         const { id, accept, directory } = msg;
         handlePick(accept, directory).then((res) => {
@@ -278,6 +331,9 @@ function Player() {
         setBuiltInZoomControls
         setDisplayZoomControls={false}
         overScrollMode="never"
+        // Winamp's text at Winamp's size, whatever the phone's font size
+        // setting (otherwise text spills out of the playlist rows).
+        textZoom={100}
         injectedJavaScriptBeforeContentLoaded={injectedAtStart}
         onMessage={onMessage}
         // Web links in the player (e.g. "Reamp..." in the long-press menu)

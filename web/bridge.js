@@ -201,9 +201,15 @@
     this._duration = 0;
     this._loadedSent = false;
     this._sentDuration = 0;
-    var info = trackInfo(url);
-    post({ t: 'load', url: url, autoPlay: !!autoPlay, title: info.title, artist: info.artist, live: info.live });
     currentUrl = url;
+    if (followingNative === url) {
+      // The app already started this one itself (see 'advanced' below).
+      followingNative = null;
+    } else {
+      var info = trackInfo(url), p = window.__player;
+      var id = p && p.store ? p.store.getState().playlist.currentTrack : null;
+      post({ t: 'load', url: url, autoPlay: !!autoPlay, title: info.title, artist: info.artist, live: info.live, id: id });
+    }
     if (window.__autoEq) window.__autoEq();
     return Promise.resolve();
   };
@@ -246,6 +252,15 @@
   // saved for next launch (so we know what to save when a skin finishes loading).
   var pendingSkin = window.__SAVED_SKIN || null, savedSkin = window.__SAVED_SKIN || null;
   var currentUrl = null;
+  // Set while we catch up with a song the app moved on to by itself.
+  var followingNative = null;
+  function followNative(msg) {
+    var p = window.__player;
+    if (!p) return;
+    followingNative = msg.url;
+    p.store.dispatch({ type: 'PLAY_TRACK', id: msg.id });
+    followingNative = null; // (consumed synchronously by loadFromUrl)
+  }
   // Title/artist for the lock screen and notification. Stations come from
   // the station list; files from the playlist entry (tags or file name).
   function trackInfo(url) {
@@ -350,6 +365,7 @@
     if (msg.t === 'meta') return onMeta(msg.items || []);
     if (msg.t === 'openFiles') return openFiles(msg.items || []);
     if (msg.t === 'openSkin') return openSkin(msg);
+    if (msg.t === 'advanced') return followNative(msg);
     var m = window.__nativeMedia;
     if (!m) return;
     if (msg.t === 'status') m._onStatus(msg);
@@ -565,6 +581,64 @@
         var snap = snapshotState(), json = JSON.stringify(snap);
         if (json !== lastJson) { lastJson = json; post({ t: 'saveState', state: snap }); }
       }, 1000);
+    });
+  }
+
+  // --- Keep the app's copy of the playlist up to date (it starts the next
+  // song itself the moment one ends; see src/queue.ts).
+  function queueSnapshot() {
+    var st = player.store.getState(), tracks = st.tracks;
+    return {
+      t: 'queue',
+      items: st.playlist.trackOrder.filter(function (id) { return tracks[id] && tracks[id].url; }).map(function (id) {
+        var info = trackInfo(tracks[id].url);
+        return { id: Number(id), url: tracks[id].url, title: String(info.title), artist: info.artist || '', live: !!info.live };
+      }),
+      current: st.playlist.currentTrack == null ? null : Number(st.playlist.currentTrack),
+      shuffle: !!st.media.shuffle,
+      repeat: !!st.media.repeat,
+    };
+  }
+  function startQueueSync() {
+    var last = {}, timer = null;
+    function changed(st) {
+      var now = { order: st.playlist.trackOrder, tracks: st.tracks, cur: st.playlist.currentTrack,
+        sh: st.media.shuffle, rep: st.media.repeat };
+      var diff = Object.keys(now).some(function (k) { return now[k] !== last[k]; });
+      var urgent = now.cur !== last.cur || now.sh !== last.sh || now.rep !== last.rep;
+      last = now;
+      return diff ? (urgent ? 2 : 1) : 0;
+    }
+    function send() { timer = null; post(queueSnapshot()); }
+    player.store.subscribe(function () {
+      var c = changed(player.store.getState());
+      if (!c) return;
+      // Track switches and shuffle/repeat go straight away; tags and lengths
+      // filling in (lots of small changes) are batched.
+      if (c === 2) { clearTimeout(timer); send(); }
+      else if (!timer) timer = setTimeout(send, 400);
+    });
+    changed(player.store.getState());
+    send();
+  }
+
+  // --- Keep the playing song in view: centred in the playlist whenever the
+  // track changes, unless the playlist was touched in the last 10 seconds.
+  var lastPlaylistTouch = 0;
+  window.addEventListener('touchstart', function (e) {
+    if (e.target && e.target.closest && e.target.closest('#playlist-window')) lastPlaylistTouch = Date.now();
+  }, { capture: true, passive: true });
+  function startFollowingCurrent() {
+    var lastCur = player.store.getState().playlist.currentTrack;
+    player.store.subscribe(function () {
+      var st = player.store.getState(), cur = st.playlist.currentTrack;
+      if (cur === lastCur) return;
+      lastCur = cur;
+      if (Date.now() - lastPlaylistTouch < 10000 || pg) return;
+      var index = st.playlist.trackOrder.indexOf(cur);
+      if (index < 0) return;
+      stopMomentum();
+      setScrollOffset(index - Math.floor((visibleRows() - 1) / 2));
     });
   }
 
@@ -865,6 +939,8 @@
     layout();
     syncEq();
     startRemembering();
+    startQueueSync();
+    startFollowingCurrent();
     post({ t: 'ready' });
   });
 })();
