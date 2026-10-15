@@ -18,15 +18,15 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false,
-      "blockedPermissions": ["android.permission.RECORD_AUDIO"]
+      "predictiveBackGestureEnabled": false
     },
     "plugins": [
       [
         "expo-audio",
         {
           "enableBackgroundPlayback": true,
-          "recordAudioAndroid": false
+          "recordAudioAndroid": true,
+          "microphonePermission": "Reamp uses audio access only to animate the visualizer. Nothing is recorded."
         }
       ],
       "./plugins/withWebampAssets"

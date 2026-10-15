@@ -12,29 +12,76 @@
   }
   window.onerror = function (m) { setStatus('error: ' + m); post({ t: 'log', msg: String(m) }); };
 
-  // --- Fake analyser: Webamp's visualizer only calls getByteTimeDomainData().
-  // We don't capture real audio (that needs the microphone permission), so we
-  // synthesise a lively waveform while playing and a flat line when stopped.
+  // --- Analyser for Webamp's visualizer, which only calls
+  // getByteTimeDomainData() and runs its own FFT on 1024 samples.
+  //
+  // Real mode: Android sends the actual playing waveform (~10 times a second,
+  // 1024 samples) once the user has allowed audio access. Between updates we
+  // shrink the last waveform a little each frame so bars fall like Winamp's
+  // instead of freezing.
+  //
+  // Fallback: until access is allowed, synthesise music-like audio (pink noise
+  // with a kick on the beat and hats on the off-beat) so the bars and peaks
+  // behave believably.
   function FakeAnalyser() {
     this.fftSize = 2048;
     this.smoothingTimeConstant = 0;
     this.active = false;
-    this._phase = 0;
+    this.real = null;        // Float32Array of -1..1 from native
+    this.realAt = 0;
+    this._frame = 0;
+    this._b = [0, 0, 0, 0, 0, 0, 0]; // pink noise filter state
+    this._t0 = performance.now();
   }
   Object.defineProperty(FakeAnalyser.prototype, 'frequencyBinCount', {
     get: function () { return this.fftSize / 2; },
   });
+  FakeAnalyser.prototype.setReal = function (bytes) {
+    var out = new Float32Array(bytes.length);
+    for (var i = 0; i < bytes.length; i++) out[i] = (bytes[i] - 128) / 128;
+    this.real = out;
+    this.realAt = performance.now();
+  };
+  FakeAnalyser.prototype._pink = function () {
+    var b = this._b, w = Math.random() * 2 - 1;
+    b[0] = 0.99886 * b[0] + w * 0.0555179; b[1] = 0.99332 * b[1] + w * 0.0750759;
+    b[2] = 0.969 * b[2] + w * 0.153852;    b[3] = 0.8665 * b[3] + w * 0.3104856;
+    b[4] = 0.55 * b[4] + w * 0.5329522;    b[5] = -0.7616 * b[5] - w * 0.016898;
+    var v = b[0] + b[1] + b[2] + b[3] + b[4] + b[5] + b[6] + w * 0.5362;
+    b[6] = w * 0.115926;
+    return v * 0.11;
+  };
   FakeAnalyser.prototype.getByteTimeDomainData = function (arr) {
+    var n = arr.length, i;
     if (!this.active) { arr.fill(128); return; }
-    this._phase += 1;
-    var p = this._phase;
-    var a1 = 30 + 25 * Math.sin(p * 0.07), a2 = 18 + 14 * Math.sin(p * 0.13 + 1);
-    var a3 = 10 + 9 * Math.sin(p * 0.31 + 2);
-    for (var i = 0; i < arr.length; i++) {
-      var v = a1 * Math.sin(i * 0.012 + p * 0.3) + a2 * Math.sin(i * 0.05 + p * 0.5) +
-        a3 * Math.sin(i * 0.21 + p) + (Math.random() - 0.5) * 22;
-      arr[i] = Math.max(0, Math.min(255, 128 + v));
+    var now = performance.now();
+    var age = now - this.realAt;
+    if (this.real && age < 400) {
+      // ~0.85 per 16ms frame: fast attack (new data), smooth fall in between.
+      var k = Math.pow(0.85, age / 16), src = this.real, m = src.length;
+      for (i = 0; i < n; i++) {
+        var v = src[Math.floor(i * m / n)] * k;
+        arr[i] = Math.max(0, Math.min(255, 128 + v * 127));
+      }
+      return;
     }
+    // Synthetic fallback at ~124 bpm.
+    var t = (now - this._t0) / 1000, beat = 60 / 124;
+    var ph = (t % beat) / beat;                 // 0..1 within the beat
+    var kick = Math.exp(-ph * 9);               // thump at the start of each beat
+    var hat = Math.exp(-Math.abs(ph - 0.5) * 30); // tick on the off-beat
+    var swell = 0.6 + 0.3 * Math.sin(t * 0.37) + 0.15 * Math.sin(t * 1.9) + 0.1 * Math.random();
+    var kf = 2 * Math.PI * (55 + 60 * kick) / 44100;
+    var lp = this._lp || 0;
+    for (i = 0; i < n; i++) {
+      lp += 0.3 * (this._pink() - lp);        // soften the treble like real mixes
+      var s = lp * swell * 1.4
+        + Math.sin(i * kf + this._frame) * 0.5 * kick
+        + (Math.random() * 2 - 1) * 0.06 * hat;
+      arr[i] = Math.max(0, Math.min(255, 128 + s * 160));
+    }
+    this._lp = lp;
+    this._frame += 1;
   };
   FakeAnalyser.prototype.getByteFrequencyData = function (arr) { arr.fill(0); };
   FakeAnalyser.prototype.getFloatTimeDomainData = function (arr) { arr.fill(0); };
@@ -106,9 +153,25 @@
     return url;
   }
 
+  var realVis = false;
   window.__fromNative = function (msg) {
-    if (msg.t === 'status' && window.__nativeMedia) window.__nativeMedia._onStatus(msg);
+    var m = window.__nativeMedia;
+    if (!m) return;
+    if (msg.t === 'status') m._onStatus(msg);
+    else if (msg.t === 'samples') m._analyser.setReal(msg.d);
+    else if (msg.t === 'visEnabled') realVis = true; // asked once; taps go back to Winamp
   };
+
+  // First tap on the visualizer asks for real audio levels instead of
+  // switching visualizer style. After that, taps behave like Winamp again.
+  window.addEventListener('click', function (e) {
+    if (realVis) return;
+    if (e.target && e.target.id === 'visualizer') {
+      e.stopPropagation();
+      e.preventDefault();
+      post({ t: 'enableVis' });
+    }
+  }, true);
 
   // --- Phone layout: main window, EQ and playlist stacked vertically,
   // playlist stretched to fill the rest of the screen.

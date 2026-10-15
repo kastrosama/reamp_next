@@ -1,12 +1,15 @@
 import { useEffect, useRef } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, View } from 'react-native';
+import { AppState, StyleSheet, View } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
+  AudioSample,
   AudioStatus,
   createAudioPlayer,
+  getRecordingPermissionsAsync,
   requestNotificationPermissionsAsync,
+  requestRecordingPermissionsAsync,
   setAudioModeAsync,
 } from 'expo-audio';
 import { STATIONS } from './src/stations';
@@ -19,7 +22,8 @@ type WebMsg =
   | { t: 'pause' }
   | { t: 'stop' }
   | { t: 'volume'; v: number }
-  | { t: 'seek'; percent: number };
+  | { t: 'seek'; percent: number }
+  | { t: 'enableVis' };
 
 // Webamp UI lives in the WebView; audio is played here, natively, so it keeps
 // running in the background with lock-screen / notification controls.
@@ -41,6 +45,39 @@ function Player() {
   // apart from pauses coming from the lock screen or headphones.
   const lastWebCommandAt = useRef(0);
   const wasPlaying = useRef(false);
+
+  const send = (payload: object) =>
+    webRef.current?.injectJavaScript(
+      `window.__fromNative && window.__fromNative(${JSON.stringify(payload)}); true;`,
+    );
+
+  // Real visualizer: Android's Visualizer API needs the RECORD_AUDIO
+  // permission even though nothing is recorded. Opt-in, from a tap.
+  const startRealVisualizer = () => {
+    player.setAudioSamplingEnabled(true);
+    send({ t: 'visEnabled', on: true });
+  };
+  const askForRealVisualizer = async () => {
+    try {
+      const { granted } = await requestRecordingPermissionsAsync();
+      if (granted) startRealVisualizer();
+      else send({ t: 'visEnabled', on: false });
+    } catch {
+      send({ t: 'visEnabled', on: false });
+    }
+  };
+
+  useEffect(() => {
+    const samples = player.addListener('audioSampleUpdate', (sample: AudioSample) => {
+      if (AppState.currentState !== 'active') return;
+      const frames = sample.channels[0]?.frames;
+      if (!frames?.length) return;
+      const d = new Array(frames.length);
+      for (let i = 0; i < frames.length; i++) d[i] = Math.round(frames[i] * 127 + 128);
+      send({ t: 'samples', d });
+    });
+    return () => samples.remove();
+  }, []);
 
   useEffect(() => {
     setAudioModeAsync({
@@ -66,9 +103,7 @@ function Player() {
         error: s.error,
         externalPause,
       };
-      webRef.current?.injectJavaScript(
-        `window.__fromNative && window.__fromNative(${JSON.stringify(payload)}); true;`,
-      );
+      send(payload);
     });
     return () => sub.remove();
   }, []);
@@ -109,6 +144,15 @@ function Player() {
         break;
       case 'seek':
         if (player.duration > 0) player.seekTo((player.duration * msg.percent) / 100).catch(() => {});
+        break;
+      case 'ready':
+        // Re-enable the real visualizer if access was allowed before.
+        getRecordingPermissionsAsync()
+          .then(({ granted }) => granted && startRealVisualizer())
+          .catch(() => {});
+        break;
+      case 'enableVis':
+        askForRealVisualizer();
         break;
       case 'log':
         console.log('[webamp]', msg.msg);
