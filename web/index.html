@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <!-- 275px = Winamp's window width; the WebView scales it up to fill the phone. -->
+  <meta name="viewport" content="width=275, user-scalable=no" />
+  <style>
+    html, body { margin: 0; padding: 0; background: #000; overflow: hidden; }
+    body { -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    #app { position: absolute; inset: 0; }
+    #status { position: fixed; bottom: 4px; left: 0; right: 0; text-align: center;
+      font: 8px monospace; color: #3a6; opacity: .8; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="status">loading…</div>
+  <script src="webamp.bundle.min.js"></script>
+  <script src="bridge.js"></script>
+</body>
+</html>
