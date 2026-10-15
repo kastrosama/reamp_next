@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { StyleSheet, View } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   AudioStatus,
   createAudioPlayer,
@@ -25,6 +26,15 @@ type WebMsg =
 const player = createAudioPlayer(null, { updateInterval: 500 });
 
 export default function App() {
+  return (
+    <SafeAreaProvider>
+      <Player />
+    </SafeAreaProvider>
+  );
+}
+
+function Player() {
+  const insets = useSafeAreaInsets();
   const webRef = useRef<WebView>(null);
   const titleRef = useRef('Reamp Next');
   // Set when the web UI itself asked to pause/stop/load, so we can tell those
@@ -107,7 +117,7 @@ export default function App() {
   };
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
       <StatusBar style="light" />
       <WebView
         ref={webRef}
@@ -128,6 +138,6 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#000', paddingTop: 36 },
+  container: { flex: 1, backgroundColor: '#000' },
   web: { flex: 1, backgroundColor: '#000' },
 });
