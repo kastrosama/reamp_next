@@ -328,13 +328,14 @@
   // check every frame while a menu is open and nudge anything that pokes
   // out back inside the window.
   function fitMenus() {
-    var root = document.getElementById('webamp-context-menu');
-    if (root && root.firstChild) {
+    // Webamp creates a separate container for every menu, all with the same
+    // id, so select them all rather than using getElementById.
+    var menus = document.querySelectorAll('[id="webamp-context-menu"] ul, ul.context-menu');
+    if (menus.length) {
       var W = document.documentElement.clientWidth, H = window.innerHeight, M = 1;
-      var menus = root.querySelectorAll('ul');
       for (var i = 0; i < menus.length; i++) {
         var ul = menus[i];
-        if (ul.offsetParent === null) continue; // hidden sub-menu
+        if (!ul.getClientRects().length) continue; // hidden sub-menu
         ul.style.transform = '';
         var r = ul.getBoundingClientRect();
         var dx = 0, dy = 0;
