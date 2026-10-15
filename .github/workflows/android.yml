@@ -17,18 +17,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
-          cache: gradle
+
+      - uses: gradle/actions/setup-gradle@v5
 
       - name: Install JS dependencies
         run: npm ci
@@ -38,7 +39,20 @@ jobs:
 
       - name: Build release APK (arm64 phones)
         working-directory: android
-        run: ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a
+        run: |
+          set -o pipefail
+          ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a 2>&1 | tee ../gradle.log
+
+      - name: Surface build errors
+        if: failure()
+        run: |
+          # Put the key error lines into an annotation so they show on the run summary.
+          if [ -f gradle.log ]; then
+            grep -E "error:|e: |FAILURE|What went wrong|Could not|> " gradle.log | grep -v "^> Task" | head -60 > errs.txt || true
+            [ -s errs.txt ] || tail -60 gradle.log > errs.txt
+            msg=$(sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g' errs.txt)
+            echo "::error title=Gradle build failed::${msg}"
+          fi
 
       - name: Name the APK
         run: |
