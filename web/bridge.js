@@ -629,17 +629,27 @@
     if (e.target && e.target.closest && e.target.closest('#playlist-window')) lastPlaylistTouch = Date.now();
   }, { capture: true, passive: true });
   function startFollowingCurrent() {
-    var lastCur = player.store.getState().playlist.currentTrack;
+    // A track change is remembered until it can be shown: if the playlist
+    // was touched recently (or the app was in the background), it's done as
+    // soon as the playlist has been left alone for 10 seconds.
+    var lastCur = player.store.getState().playlist.currentTrack, pending = lastCur != null;
+    function tryCentre() {
+      if (!pending || document.hidden) return;
+      if (Date.now() - lastPlaylistTouch < 10000 || pg || momentum) return;
+      pending = false;
+      var st = player.store.getState(), index = st.playlist.trackOrder.indexOf(st.playlist.currentTrack);
+      if (index < 0) return;
+      setScrollOffset(index - Math.floor((visibleRows() - 1) / 2));
+    }
     player.store.subscribe(function () {
-      var st = player.store.getState(), cur = st.playlist.currentTrack;
+      var cur = player.store.getState().playlist.currentTrack;
       if (cur === lastCur) return;
       lastCur = cur;
-      if (Date.now() - lastPlaylistTouch < 10000 || pg) return;
-      var index = st.playlist.trackOrder.indexOf(cur);
-      if (index < 0) return;
-      stopMomentum();
-      setScrollOffset(index - Math.floor((visibleRows() - 1) / 2));
+      pending = true;
+      tryCentre();
     });
+    setInterval(tryCentre, 1000);
+    document.addEventListener('visibilitychange', tryCentre);
   }
 
   // Send the current EQ settings to native (the player only pushes changes).
@@ -912,6 +922,10 @@
       }
     }
   }, { capture: true, passive: false });
+
+  // Android sometimes cancels a touch instead of ending it; drop the gesture
+  // so nothing is left thinking a finger is still down.
+  window.addEventListener('touchcancel', function () { cancelPlaylistGesture(); }, true);
 
   // Android's own long-press would open the menu while the finger is still
   // down (and before we know whether it's a drag). Over the track list we
