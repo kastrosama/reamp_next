@@ -323,6 +323,32 @@
     BANDS.forEach(function (b, i) { post({ t: 'eqBand', i: i, v: eq.sliders[b] }); });
   }
 
+  // Keep every Webamp menu (presets, options, playlist buttons) and its
+  // sub-menus fully on screen. Sub-menus open on hover/tap via CSS, so we
+  // check every frame while a menu is open and nudge anything that pokes
+  // out back inside the window.
+  function fitMenus() {
+    var root = document.getElementById('webamp-context-menu');
+    if (root && root.firstChild) {
+      var W = document.documentElement.clientWidth, H = window.innerHeight, M = 1;
+      var menus = root.querySelectorAll('ul');
+      for (var i = 0; i < menus.length; i++) {
+        var ul = menus[i];
+        if (ul.offsetParent === null) continue; // hidden sub-menu
+        ul.style.transform = '';
+        var r = ul.getBoundingClientRect();
+        var dx = 0, dy = 0;
+        if (r.right > W - M) dx = W - M - r.right;
+        if (r.left + dx < M) dx = M - r.left;
+        if (r.bottom > H - M) dy = H - M - r.bottom;
+        if (r.top + dy < M) dy = M - r.top;
+        if (dx || dy) ul.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+      }
+    }
+    requestAnimationFrame(fitMenus);
+  }
+  requestAnimationFrame(fitMenus);
+
   webamp.renderWhenReady(document.getElementById('app')).then(function () {
     setStatus('');
     var busy = false;
