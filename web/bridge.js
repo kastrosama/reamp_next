@@ -200,7 +200,9 @@
     this._time = 0;
     this._duration = 0;
     this._loadedSent = false;
-    post({ t: 'load', url: url, autoPlay: !!autoPlay, title: titleFor(url) });
+    this._sentDuration = 0;
+    var info = trackInfo(url);
+    post({ t: 'load', url: url, autoPlay: !!autoPlay, title: info.title, artist: info.artist, live: info.live });
     currentUrl = url;
     if (window.__autoEq) window.__autoEq();
     return Promise.resolve();
@@ -213,6 +215,12 @@
     this._time = s.currentTime || 0;
     this._duration = s.duration > 0 && isFinite(s.duration) ? s.duration : 0;
     if (s.isLoaded && !this._loadedSent) { this._loadedSent = true; this._emit('fileLoaded'); }
+    // Local files learn their length a moment after loading; tell the player
+    // so the time display and seek bar work.
+    if (this._duration > 0 && this._duration !== this._sentDuration) {
+      this._sentDuration = this._duration;
+      this._emit('fileLoaded');
+    }
     if (s.isBuffering !== this._buffering) {
       this._buffering = s.isBuffering;
       this._emit(s.isBuffering ? 'waiting' : 'stopWaiting');
@@ -235,17 +243,61 @@
 
   var stations = window.__STATIONS || [];
   var currentUrl = null;
-  function titleFor(url) {
-    for (var i = 0; i < stations.length; i++) if (stations[i].url === url) return stations[i].name;
-    return url;
+  // Title/artist for the lock screen and notification. Stations come from
+  // the station list; files from the playlist entry (tags or file name).
+  function trackInfo(url) {
+    var local = !/^https?:/i.test(url);
+    for (var i = 0; i < stations.length; i++) {
+      if (stations[i].url === url) return { title: stations[i].name, artist: stations[i].genre || 'Radio', live: true };
+    }
+    var p = window.__player;
+    if (p && p.store) {
+      var tracks = p.store.getState().tracks;
+      for (var id in tracks) {
+        var t = tracks[id];
+        if (t.url === url) {
+          var name = (t.defaultName || '').replace(/\.[a-z0-9]{2,4}$/i, '');
+          return { title: t.title || name || url, artist: t.artist || (local ? '' : 'Radio'), live: !local };
+        }
+      }
+    }
+    return { title: url, artist: '', live: !local };
+  }
+
+  // --- Native file pickers. The engine's file dialogs call this (see
+  // plugins/patchPlayer.js) and expect a list of picked file references.
+  var pickId = 0, pickWaiting = {};
+  window.__pickFiles = function (opts) {
+    return new Promise(function (resolve) {
+      var id = ++pickId;
+      pickWaiting[id] = resolve;
+      post({ t: 'pickFiles', id: id, accept: (opts && opts.accept) || null, directory: !!(opts && opts.directory) });
+    });
+  };
+  function onPicked(msg) {
+    var resolve = pickWaiting[msg.id];
+    if (!resolve) return;
+    delete pickWaiting[msg.id];
+    var refs = [];
+    // Music: references the native player can stream.
+    (msg.items || []).forEach(function (it) { refs.push({ __url: it.url, name: it.name }); });
+    // Small files the engine reads itself (EQ presets, skins): real File objects.
+    (msg.files || []).forEach(function (f) {
+      var bin = atob(f.b64), bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      refs.push(new File([bytes], f.name, { type: f.type || '' }));
+    });
+    resolve(refs);
   }
 
   var realVis = false;
   window.__fromNative = function (msg) {
+    if (msg.t === 'picked') return onPicked(msg);
     var m = window.__nativeMedia;
     if (!m) return;
     if (msg.t === 'status') m._onStatus(msg);
     else if (msg.t === 'samples') m._analyser.setReal(msg.d);
+    else if (msg.t === 'picked') onPicked(msg);
     else if (msg.t === 'visEnabled') realVis = true; // asked once; taps go back to Winamp
   };
 
@@ -264,7 +316,7 @@
   // full width. The playlist stretches to fill whatever height is left, and
   // re-stretches whenever the EQ or playlist is opened, closed or shaded.
   var FULL = 116, SHADE = 14, STEP = 29;
-  var H = window.innerHeight || 600;
+  var H = document.documentElement.clientHeight || window.innerHeight || 600;
   var extraHeight = Math.max(0, Math.floor((H - FULL * 3) / STEP));
 
   // The engine (MIT, see THIRD_PARTY_NOTICES.md) exposes its constructor globally.
@@ -289,7 +341,8 @@
 
   function layout() {
     var store = player.store, st = store.getState(), w = st.windows.genWindows;
-    var H = window.innerHeight;
+    // Layout viewport height: stays the same while pinch-zoomed.
+    var H = document.documentElement.clientHeight;
     var main = w.main, eq = w.equalizer, pl = w.playlist;
     var hMain = main.open ? (main.shade ? SHADE : FULL) : 0;
     var hEq = eq.open ? (eq.shade ? SHADE : FULL) : 0;
@@ -395,7 +448,7 @@
     // same (engine-defined) id, so select them all rather than using getElementById.
     var menus = document.querySelectorAll('[id="webamp-context-menu"] ul, ul.context-menu');
     if (menus.length) {
-      var W = document.documentElement.clientWidth, H = window.innerHeight, M = 1;
+      var W = document.documentElement.clientWidth, H = document.documentElement.clientHeight, M = 1;
       for (var i = 0; i < menus.length; i++) {
         var ul = menus[i];
         if (!ul.getClientRects().length) continue; // hidden sub-menu
@@ -412,6 +465,50 @@
     requestAnimationFrame(fitMenus);
   }
   requestAnimationFrame(fitMenus);
+
+  // --- Pinch-to-zoom: handled by the WebView itself (nothing is drawn or
+  // changed in the player). Double-tap while zoomed snaps back to normal.
+  // When not zoomed, double-tap does what it always did (e.g. shade a window).
+  var vp = document.getElementById('vp');
+  var VP_ZOOM = vp.getAttribute('content');
+  function isZoomed() {
+    // Zoomed in = we can see noticeably less than the full page width.
+    var v = window.visualViewport;
+    return v ? v.width < document.documentElement.clientWidth * 0.95 : false;
+  }
+  function resetZoom() {
+    // Briefly disallowing zoom makes the browser snap back to fit-width.
+    vp.setAttribute('content', 'width=275, user-scalable=no');
+    setTimeout(function () { vp.setAttribute('content', VP_ZOOM); }, 350);
+  }
+  var lastTap = { t: 0, x: 0, y: 0 }, ownDbl = 0;
+  document.addEventListener('touchend', function (e) {
+    if (e.touches.length || e.changedTouches.length !== 1) return;
+    var p = e.changedTouches[0], now = Date.now();
+    var dbl = now - lastTap.t < 350 && Math.abs(p.clientX - lastTap.x) < 25 && Math.abs(p.clientY - lastTap.y) < 25;
+    lastTap = { t: dbl ? 0 : now, x: p.clientX, y: p.clientY };
+    if (!dbl) return;
+    ownDbl = now;
+    if (isZoomed()) {
+      e.preventDefault();
+      resetZoom();
+      return;
+    }
+    // Not zoomed: deliver the double-tap to the player as a double-click
+    // (e.g. shade a window by double-tapping its title bar, like Winamp).
+    var target = document.elementFromPoint(p.clientX, p.clientY);
+    if (target) {
+      target.dispatchEvent(new MouseEvent('dblclick', {
+        bubbles: true, cancelable: true, view: window, clientX: p.clientX, clientY: p.clientY,
+        __reamp: true,
+      }));
+    }
+  }, { capture: true, passive: false });
+  // Ignore any double-click the browser itself generates from those taps, so
+  // nothing happens twice.
+  document.addEventListener('dblclick', function (e) {
+    if (e.isTrusted && Date.now() - ownDbl < 600) { e.stopPropagation(); e.preventDefault(); }
+  }, true);
 
   player.renderWhenReady(document.getElementById('app')).then(function () {
     setStatus('');

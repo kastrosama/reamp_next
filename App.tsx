@@ -14,11 +14,13 @@ import {
 } from 'expo-audio';
 import { STATIONS } from './src/stations';
 import { ReampEq, sliderToDb } from './modules/reamp-eq';
+import { handlePick } from './src/pickers';
 
 type WebMsg =
   | { t: 'ready' }
   | { t: 'log'; msg: string }
-  | { t: 'load'; url: string; autoPlay: boolean; title: string }
+  | { t: 'load'; url: string; autoPlay: boolean; title: string; artist?: string; live?: boolean }
+  | { t: 'pickFiles'; id: number; accept: string | null; directory: boolean }
   | { t: 'play' }
   | { t: 'pause' }
   | { t: 'stop' }
@@ -137,12 +139,19 @@ function Player() {
         player.replace({ uri: msg.url });
         player.setActiveForLockScreen(
           true,
-          { title: msg.title, artist: 'Reamp Next' },
-          { isLiveStream: true, showSeekForward: false, showSeekBackward: false },
+          { title: msg.title, artist: msg.artist || 'Reamp' },
+          msg.live === false
+            ? { isLiveStream: false, showSeekForward: true, showSeekBackward: true }
+            : { isLiveStream: true, showSeekForward: false, showSeekBackward: false },
         );
         if (msg.autoPlay) player.play();
         attachEq();
         break;
+      case 'pickFiles': {
+        const { id, accept, directory } = msg;
+        handlePick(accept, directory).then((res) => send({ t: 'picked', id, ...res }));
+        break;
+      }
       case 'eqBand':
         ReampEq.setBand(msg.i, sliderToDb(msg.v));
         break;
@@ -197,7 +206,9 @@ function Player() {
         allowFileAccessFromFileURLs
         javaScriptEnabled
         scalesPageToFit
-        setBuiltInZoomControls={false}
+        // Pinch-to-zoom on, but no on-screen +/- zoom buttons.
+        setBuiltInZoomControls
+        setDisplayZoomControls={false}
         overScrollMode="never"
         injectedJavaScriptBeforeContentLoaded={`window.__STATIONS = ${JSON.stringify(STATIONS)}; true;`}
         onMessage={onMessage}

@@ -1,6 +1,7 @@
 // Patches the bundled player engine when it's copied into the app:
-// rebrands user-visible text and links for Reamp, and enables the EQ
-// "Auto" button (the engine ships with it disabled).
+// rebrands user-visible text and links for Reamp, enables the EQ "Auto"
+// button (the engine ships with it disabled) and routes file dialogs to
+// Android's own pickers.
 //
 // The engine is Webamp (MIT licensed). Its licence notice is kept in
 // THIRD_PARTY_NOTICES.md, as the MIT licence requires; only the in-app
@@ -16,6 +17,19 @@ const REPLACEMENTS = [
   [
     'return e=>{e({type:"SET_EQ_AUTO",value:!1})}',
     'return(e,t)=>{e({type:"SET_EQ_AUTO",value:!t().equalizer.auto})}',
+  ],
+  // File dialogs (Add file, Add dir, Eject, load EQ preset/skin): the
+  // browser file input only offers camera/photos inside an Android WebView,
+  // so hand the request to Reamp's native pickers when available.
+  [
+    'directory:!1}){return new Promise(n=>{const a=document.createElement("input");',
+    'directory:!1}){if(window.__pickFiles)return window.__pickFiles({accept:e,directory:t});return new Promise(n=>{const a=document.createElement("input");',
+  ],
+  // Picked music files arrive as references to device files (content://),
+  // which the native player streams directly, rather than in-memory blobs.
+  [
+    '.map(e=>({blob:e,defaultName:e.name}))',
+    '.map(e=>e.__url?{url:e.__url,defaultName:e.name}:{blob:e,defaultName:e.name})',
   ],
 ];
 
