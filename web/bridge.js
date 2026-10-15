@@ -580,7 +580,7 @@
   // sub-menus fully on screen. Sub-menus open on hover/tap via CSS, so we
   // check every frame while a menu is open and nudge anything that pokes
   // out back inside the window.
-  function fitMenus() {
+  function fitMenusOnce() {
     // The engine creates a separate container for every menu, all with the
     // same (engine-defined) id, so select them all rather than using getElementById.
     var menus = document.querySelectorAll('[id="webamp-context-menu"] ul, ul.context-menu');
@@ -599,9 +599,14 @@
         if (dx || dy) ul.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
       }
     }
+  }
+  function fitMenus() {
+    fitMenusOnce();
     requestAnimationFrame(fitMenus);
   }
   requestAnimationFrame(fitMenus);
+  // Also fit a menu the instant it's added, before it's ever painted.
+  new MutationObserver(fitMenusOnce).observe(document.body, { childList: true, subtree: true });
 
   // --- Pinch-to-zoom: handled by the WebView itself (nothing is drawn or
   // changed in the player). Double-tap while zoomed snaps back to normal.

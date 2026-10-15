@@ -14,6 +14,9 @@
        blocks pinch-zoom everywhere. Allow pinch only: one-finger drags still
        go to the player, two fingers zoom. */
     #webamp [style*="touch-action"], #webamp input { touch-action: pinch-zoom !important; }
+    /* Menus are drawn in their own layer that never counts towards the page's
+       width, so opening one can't make Android zoom the whole player out. */
+    [id="webamp-context-menu"] { position: fixed !important; }
     #app { position: absolute; inset: 0; }
     #status { position: fixed; bottom: 4px; left: 0; right: 0; text-align: center;
       font: 8px monospace; color: #3a6; opacity: .8; pointer-events: none; }
