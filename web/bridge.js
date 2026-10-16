@@ -472,6 +472,22 @@
       store.dispatch({ type: 'WINDOW_SIZE_CHANGED', windowId: 'playlist', size: [0, plExtra] });
     }
     if (moved) store.dispatch({ type: 'UPDATE_WINDOW_POSITIONS', positions: want, absolute: true });
+    fitPlaylistRows(plExtra);
+  }
+
+  // The engine shows floor((58 + 29*extra) / 13) rows, but the list area has
+  // 3px of padding above and below, so at some heights the last row hangs
+  // off the bottom. Take just enough padding away (top first) to fit it.
+  var rowFitStyle = document.createElement('style');
+  document.head.appendChild(rowFitStyle);
+  var rowFitFor = null;
+  function fitPlaylistRows(extra) {
+    if (extra === rowFitFor) return;
+    rowFitFor = extra;
+    var area = 58 + STEP * extra, need = Math.floor(area / 13) * 13 - (area - 6);
+    var top = 3, bottom = 3;
+    if (need > 0) { var t = Math.min(3, need); top -= t; bottom -= Math.min(3, need - t); }
+    rowFitStyle.textContent = '#webamp .playlist-middle-center { padding-top: ' + top + 'px !important; padding-bottom: ' + bottom + 'px !important; }';
   }
 
   // --- EQ "Auto": pick a preset from the station's genre whenever the
@@ -691,6 +707,40 @@
   requestAnimationFrame(fitMenus);
   // Also fit a menu the instant it's added, before it's ever painted.
   new MutationObserver(fitMenusOnce).observe(document.body, { childList: true, subtree: true });
+
+  // --- Menus close when you tap anywhere outside them (the engine only closes
+  // them on a click, and most of the player swallows taps before a click
+  // happens). That tap only closes the menu: nothing underneath is pressed.
+  function openMenuEls() {
+    return Array.prototype.filter.call(
+      document.querySelectorAll('[id="webamp-context-menu"], .playlist-menu.selected'),
+      function (el) { return el.getClientRects().length > 0 && (el.classList.contains('playlist-menu') || el.querySelector('ul')); });
+  }
+  var dismissing = false, dismissedAt = 0;
+  window.addEventListener('touchstart', function (e) {
+    if (!e.isTrusted || dismissing) { if (dismissing) e.stopImmediatePropagation(); return; }
+    var menus = openMenuEls();
+    if (!menus.length) return;
+    var inside = menus.some(function (m) { return m.contains(e.target); });
+    if (inside) return;
+    dismissing = true;
+    e.stopImmediatePropagation();
+    // The engine's own "clicked elsewhere" handlers close every open menu.
+    document.body.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0, view: window }));
+  }, { capture: true, passive: true });
+  ['touchmove', 'touchend', 'touchcancel', 'pointerdown', 'pointermove', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu'].forEach(function (type) {
+    window.addEventListener(type, function (e) {
+      if (!e.isTrusted) return;
+      if (dismissing || Date.now() - dismissedAt < 400) {
+        e.stopImmediatePropagation();
+        if (e.cancelable && type !== 'touchmove') e.preventDefault();
+      }
+      if (dismissing && (type === 'touchend' || type === 'touchcancel') && e.touches && e.touches.length === 0) {
+        dismissing = false;
+        dismissedAt = Date.now();
+      }
+    }, { capture: true, passive: false });
+  });
 
   // --- Pinch-to-zoom: handled by the WebView itself (nothing is drawn or
   // changed in the player). Double-tap while zoomed snaps back to normal.

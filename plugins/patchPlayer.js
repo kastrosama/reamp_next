@@ -12,6 +12,8 @@ const REPLACEMENTS = [
   ['"https://webamp.org/about"', '"https://reamp.app/"'],
   // Messages shown for features that aren't available.
   ['"Not supported in Webamp"', '"Not supported in Reamp"'],
+  // Text in the main display when nothing is loaded.
+  ['const t="Winamp 2.91"', 'const t="ReAmp by Kast0r"'],
   // EQ "Auto" button: the engine always forces it off. Make it a real
   // toggle; Reamp then picks a preset per station (see web/bridge.js).
   [
